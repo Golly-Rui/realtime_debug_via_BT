@@ -2,6 +2,9 @@ import serial
 import serial.tools.list_ports
 import logging
 import time
+import struct
+import pandas as pd
+import sqlite3
 
 __author__ = 'Guoli LV'
 __email__ = 'guoli-lv@hotmail.com'
@@ -14,6 +17,7 @@ class DebugViaBT():
     AT_STATE = b'AT+STATE?\r\n'
     AT_CONNECTED = b'+STATE:CONNECTED\r\n'
     AT_CONNECT = b'AT+LINK=ba,55,57083C\r\n'
+    pdColumns = ['timestamp','pitch','kp','ki','kd']
 
     def __init__(self, dev='/dev/ttyUSB0'):
         super(DebugViaBT, self).__init__()
@@ -29,8 +33,19 @@ class DebugViaBT():
         self.logger.setLevel(logging.INFO)
         self.logger.addHandler(handler)
 
-        # TODO manually select port
+        self._database = sqlite3.connect('bluetooth.db')
+
+        # Prompt to select serial port
         self.ports = serial.tools.list_ports.comports()
+        listToShow = ['Device:%s\tDescription:%s'%(port.device,port.description) for port in self.ports]
+        for index in range(len(listToShow)):
+            listToShow[index]='%d\t%s'%(index,listToShow[index])
+        [print(device) for device in listToShow]
+
+        devIndex = int(input('Select device:'))
+        self.device = self.ports[devIndex]
+        print('Device selected:%s'%self.ports[devIndex].device)
+        dev = self.device.device
 
         self.ser = serial.Serial(dev, baudrate=115200, timeout=1)
         if not self.ser.is_open:
@@ -74,7 +89,12 @@ class DebugViaBT():
                 self.logger.error("Received: %s" % (str(received)))
 
     def loop(self):
-        pass
+        while(True):
+            received = self.ser.readline()
+            if received is b'':
+                continue
+            if received[-2:] == b'\r\n':
+                pd.DataFrame([struct.unpack('<Iffff',received[0:-2])],columns = self.pdColumns)
 
 if __name__ == "__main__":
     debugViaBT = DebugViaBT()
