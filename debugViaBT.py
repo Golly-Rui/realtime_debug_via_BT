@@ -20,10 +20,16 @@ class DebugViaBT():
     AT_STATE = b'AT+STATE?\r\n'
     AT_CONNECTED = b'+STATE:CONNECTED\r\n'
     AT_CONNECT = b'AT+LINK=ba,55,57083C\r\n'
-    pdColumns = ['timestamp','tick','pitch','setpoint','kp','ki','kd']
+    pdColumns = ['timestamp','tick','measured','setpoint','kp','ki','kd']
     buffer = pd.DataFrame()
+    changing = False
+    stopped = False
+    kp = None
+    ki = None
+    kd = None
+    setpoint = None
 
-    def __init__(self, dev='/dev/ttyUSB0',interactivePlot=False,interactiveSend=False):
+    def __init__(self, dev=None,interactivePlot=False,interactiveSend=False):
         '''
 
         :param dev: serial port, when None is passed, a prompt that asks users to choose serial port will be showed.
@@ -35,12 +41,6 @@ class DebugViaBT():
         self.serLock = threading.Lock()
         self.interactivePlot = interactivePlot
         self.interactiveSend = interactiveSend
-        self.tranferQueue = queue.Queue()
-        self.stopped = False
-        self.kp = None
-        self.ki = None
-        self.kd = None
-        self.setpoint = None
 
         # Perform check on system platform
 
@@ -114,32 +114,48 @@ class DebugViaBT():
         t.start()
 
     def __receive_loop(self):
-        fig = plt.figure()
         while self.stopped is False:
             received = self.ser.readline()
             if received is b'':
                 continue
             if received[-2:] == b'\r\n':
                 try:
-                    # tick(uint64),pitch(float),setpoint(float),kp(float),ki(float),kd(float)
+                    # tick(uint64),measured(float),setpoint(float),kp(float),ki(float),kd(float)
                     structure = list(struct.unpack('<Ifffff',received[0:-2]))
                     structure.insert(0,time.time())
-                    dataPack = pd.DataFrame([structure],columns = self.pdColumns)
-                    self.buffer = self.buffer.append(dataPack)
-                    dataPack['timestamp'] = time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(dataPack['timestamp'][0]))
+                    dataPack = pd.DataFrame([structure],columns = self.pdColumns,dtype=pd.np.float32)
+
+                    # TODO validation
 
                     # If PID and setpoint values stored in this object differs from remote device,
                     # then we should update the values in the remote one.
                     # However, when PID values stored are None, which means we haven't set PID values in this item,
                     # we should update these ones with remote ones.
-                    if self.kp != dataPack['kp'].item() or self.ki != dataPack['ki'].item() or self.kd != dataPack['kd'].item() or self.setpoint != dataPack['setpoint'].item():
-                        if self.kp is None:
-                            self.kp = dataPack['kp'].item()
-                            self.ki = dataPack['ki'].item()
-                            self.kd = dataPack['kd'].item()
-                            self.setpoint = dataPack['setpoint'].item()
-                        else:
-                            self.__transfer_thread(self.kp,self.ki,self.kd,self.setpoint)
+                    if self.kp is None:
+                        self.kp = dataPack['kp'].item()
+                        self.ki = dataPack['ki'].item()
+                        self.kd = dataPack['kd'].item()
+                        self.setpoint = dataPack['setpoint'].item()
+                        self.ax.set_title('Setpoint Kp Ki Kd\n%s'% dataPack[['setpoint','kp','ki','kd']].to_string(header=False, index=False))
+                    elif not pd.np.isclose(self.kp,dataPack['kp'].item()) or not pd.np.isclose(self.ki,dataPack['ki'].item()) or not pd.np.isclose(self.kd,dataPack['kd'].item()) or not pd.np.isclose(self.setpoint,dataPack['setpoint'].item()):
+                        self.changing = True
+                        self.__transfer_thread(self.kp,self.ki,self.kd,self.setpoint)
+                    elif self.changing is True:
+                        self.changing = False
+                        self.buffer = pd.DataFrame()
+                        self.ax.set_title('Setpoint Kp Ki Kd\n%s'% dataPack[['setpoint','kp','ki','kd']].to_string(header=False, index=False))
+
+                    dataPack['timestamp'] = time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(dataPack['timestamp'][0]))
+                    self.buffer = self.buffer.append(dataPack)
+
+                    if self.interactivePlot is True:
+                        err = self.buffer['measured'] - self.buffer['setpoint']
+                        self.plot.set_xdata(self.buffer['tick'])
+                        self.plot.set_ydata(err)
+                        self.ax.set_xlim(self.buffer['tick'].min(),self.buffer['tick'].max())
+                        self.ax.set_ylim(err.min(),err.max())
+                    else:
+                        print(dataPack.to_string(header=False, index=False),end='\r',flush=True)
 
                 except struct.error as e:
                     self.logger.info('Invalid data (Length:%d): %s Error:%s'%(len(received),str(received),str(e)))
@@ -163,6 +179,11 @@ class DebugViaBT():
         """
         """
         try:
+            if self.interactivePlot is True:
+                plt.ion()
+                self.ax = plt.figure().add_subplot(111)
+                self.plot = plt.Line2D((None,),(None,))
+                self.ax.add_line(self.plot)
             while True:
                 if self.interactiveSend is True:
                     newValues = input("New PID and setpoint value(separated by space, can be float numbers):\n").split()
@@ -180,13 +201,16 @@ class DebugViaBT():
                     pass
 
         except KeyboardInterrupt as e:
-            self.stopped = True
             # exit infinite loop
+
+            # Signal thread to stop
+            self.stopped = True
+
             if self.interactivePlot is False:
                 try:
-                    self.buffer['err'] = self.buffer['pitch'] - self.buffer['setpoint']
+                    self.buffer['err'] = self.buffer['measured'] - self.buffer['setpoint']
                     self.buffer.plot.line('tick','err',title='')
-                    print("Err mean:%f"%self.buffer['err'].mean())
+                    self.logger.info("Err mean:%f"%self.buffer['err'].mean())
                     plt.show()
                 except KeyError:
                     pass
@@ -194,7 +218,7 @@ class DebugViaBT():
 
             # b'PID' + struct.pack('<ffff',self.kp,self.ki,self.kd,self.target) +b'\r\n'
 if __name__ == "__main__":
-    debugViaBT = DebugViaBT(interactiveSend=True)
+    debugViaBT = DebugViaBT(dev='/dev/ttyUSB0',interactiveSend=True,interactivePlot=True)
     # debugViaBT.receive_loop()
     debugViaBT.input_new_value()
 
