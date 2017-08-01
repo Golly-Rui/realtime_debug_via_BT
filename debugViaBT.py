@@ -109,15 +109,20 @@ class DebugViaBT():
                 self.logger.error("Received: %s" % (str(received)))
 
         if self.interactivePlot is True:
-            plt.ion()
-            self.ax =plt.figure().add_subplot(111)
+            self.fig= plt.figure()
+            self.ax = self.fig.add_subplot(111)
             self.plot = plt.Line2D((None,),(None,))
             self.ax.add_line(self.plot)
+            self.fig.canvas.draw()
+            plt.show(block=False)
 
         # Start __receive_loop
-        t = threading.Thread(target=self.__receive_loop)
-        t.setDaemon(True)
-        t.start()
+        threads = list()
+        threads.append(threading.Thread(target=self.__receive_loop))
+        # threads.append(threading.Thread(target=self.input_new_value))
+        for t in threads:
+            t.setDaemon(True)
+            t.start()
 
     def __receive_loop(self):
         buffer = b''
@@ -163,9 +168,10 @@ class DebugViaBT():
                         err = self.buffer['measured'] - self.buffer['setpoint']
                         if len(err) >1:
                             self.plot.set_data(self.buffer['tick'],err)
-                            plt.pause(0.01)
+                            # plt.pause(0.01)
                             self.ax.set_xlim(self.buffer['tick'].min(),self.buffer['tick'].max())
                             self.ax.set_ylim(err.min(),err.max())
+                            self.fig.canvas.draw()
                     else:
                         print(dataPack.to_string(header=False, index=False),end='\r',flush=True)
                 except struct.error as e:
@@ -226,4 +232,6 @@ if __name__ == "__main__":
     debugViaBT = DebugViaBT(dev='/dev/ttyUSB0',interactiveSend=True,interactivePlot=True)
     # debugViaBT.receive_loop()
     debugViaBT.input_new_value()
+    # while True:
+        # time.sleep(0.1)
 
