@@ -5,13 +5,13 @@ import time
 import struct
 import pandas as pd
 import sqlite3
+import matplotlib
 import matplotlib.pyplot as plt
 import threading
 import re
 
 __author__ = 'Guoli LV'
 __email__ = 'guoli-lv@hotmail.com'
-
 
 class DebugViaBT():
     AT_INQ = b'AT+INQ?\r\n'
@@ -28,6 +28,8 @@ class DebugViaBT():
     ki = None
     kd = None
     setpoint = None
+    setTitle = False
+    toPlot = False
 
     def __init__(self, dev=None,interactivePlot=False,interactiveSend=False):
         '''
@@ -68,7 +70,7 @@ class DebugViaBT():
             dev = self.device.device
 
         self.ser = serial.Serial(dev, baudrate=115200, timeout=1)
-        if not self.ser.is_open:
+        if not self.ser.isOpen():
             self.ser.open()
         while True:
             print("Please keep pressing button to keep in AT mode.")
@@ -101,7 +103,7 @@ class DebugViaBT():
             # Connect
             self.ser.write(self.AT_CONNECT)
             self.logger.info("Connecting...")
-            time.sleep(3)
+            time.sleep(0.5)
             received = self.ser.readline()
             if received == self.AT_OK:
                 self.logger.info("Successfully connect to slave BT device.")
@@ -109,22 +111,24 @@ class DebugViaBT():
                 self.logger.error("Received: %s" % (str(received)))
 
         if self.interactivePlot is True:
+            # plt.ion()
             self.fig= plt.figure()
-            self.ax = self.fig.add_subplot(111)
+            plt.show(block=False)
+            self.ax = self.fig.gca()
             self.plot = plt.Line2D((None,),(None,))
             self.ax.add_line(self.plot)
-            self.fig.canvas.draw()
-            plt.show(block=False)
+            plt.pause(0.05)
+            # self.fig.canvas.draw()
 
         # Start __receive_loop
         threads = list()
-        threads.append(threading.Thread(target=self.__receive_loop))
-        # threads.append(threading.Thread(target=self.input_new_value))
+        threads.append(threading.Thread(target=self.receive_loop))
+        threads.append(threading.Thread(target=self.input_new_value))
         for t in threads:
             t.setDaemon(True)
             t.start()
 
-    def __receive_loop(self):
+    def receive_loop(self):
         buffer = b''
         while self.stopped is False:
             buffer = buffer + self.ser.read_all()
@@ -151,7 +155,8 @@ class DebugViaBT():
                         self.kd = dataPack['kd'].item()
                         self.setpoint = dataPack['setpoint'].item()
                         if self.interactivePlot is True:
-                            self.ax.set_title('Setpoint Kp Ki Kd\n%s'% dataPack[['setpoint','kp','ki','kd']].to_string(header=False, index=False))
+                            self.setTitle = True
+                            self.dataPack = dataPack
                     elif not pd.np.isclose(self.kp,dataPack['kp'].item()) or not pd.np.isclose(self.ki,dataPack['ki'].item()) or not pd.np.isclose(self.kd,dataPack['kd'].item()) or not pd.np.isclose(self.setpoint,dataPack['setpoint'].item()):
                         self.changing = True
                         self.__transfer_thread(self.kp,self.ki,self.kd,self.setpoint)
@@ -159,19 +164,15 @@ class DebugViaBT():
                         self.changing = False
                         self.buffer = pd.DataFrame()
                         if self.interactivePlot is True:
-                            self.ax.set_title('Kp Ki Kd Setpoint\n%s'% dataPack[['kp','ki','kd','setpoint']].to_string(header=False, index=False))
+                            self.setTitle = True
+                            self.dataPack = dataPack
 
                     dataPack['timestamp'] = time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(dataPack['timestamp'][0]))
                     self.buffer = self.buffer.append(dataPack)
 
                     if self.interactivePlot is True:
-                        err = self.buffer['measured'] - self.buffer['setpoint']
-                        if len(err) >1:
-                            self.plot.set_data(self.buffer['tick'],err)
-                            # plt.pause(0.01)
-                            self.ax.set_xlim(self.buffer['tick'].min(),self.buffer['tick'].max())
-                            self.ax.set_ylim(err.min(),err.max())
-                            self.fig.canvas.draw()
+                        if len(self.buffer['measured']) >1:
+                            self.toPlot = True
                     else:
                         print(dataPack.to_string(header=False, index=False),end='\r',flush=True)
                 except struct.error as e:
@@ -195,7 +196,7 @@ class DebugViaBT():
         """
         """
         try:
-            while True:
+            while self.stopped is False:
                 if self.interactiveSend is True:
                     newValues = input("New PID and setpoint value(separated by space, can be float numbers):\n").split()
                     if len(newValues) != 4:
@@ -225,13 +226,34 @@ class DebugViaBT():
                     plt.show()
                 except KeyError:
                     pass
-
-
             # b'PID' + struct.pack('<ffff',self.kp,self.ki,self.kd,self.target) +b'\r\n'
+
+    def update(self):
+        try:
+            while self.stopped is False:
+                if self.interactivePlot is True:
+                    if self.toPlot is True:
+                        err = self.buffer['measured'] - self.buffer['setpoint']
+                        self.plot.set_data(self.buffer['tick'],err)
+                        self.ax.set_xlim(self.buffer['tick'].min(),self.buffer['tick'].max())
+                        self.ax.set_ylim(err.min(),err.max())
+                        # self.fig.canvas.draw()
+                        self.toPlot = False
+                        plt.pause(0.001)
+
+                    if self.setTitle is True:
+                        self.ax.set_title('Kp Ki Kd Setpoint\n%s'% self.dataPack[['kp','ki','kd','setpoint']].to_string(header=False, index=False))
+                        self.setTitle = False
+                else:
+                    pass
+        except KeyboardInterrupt:
+            self.stopped = True
+
 if __name__ == "__main__":
-    debugViaBT = DebugViaBT(dev='/dev/ttyUSB0',interactiveSend=True,interactivePlot=True)
+    debugViaBT = DebugViaBT(dev=None,interactiveSend=True,interactivePlot=True)
     # debugViaBT.receive_loop()
-    debugViaBT.input_new_value()
-    # while True:
+    # debugViaBT.input_new_value()
+    debugViaBT.update()
         # time.sleep(0.1)
+        # debugViaBT.update()
 
